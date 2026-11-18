@@ -151,6 +151,12 @@ _LOCAL_AMBIGUOUS_CODES = frozenset(
         MIoTErrorCode.CODE_MIPS_INVALID_RESULT.value,  # -10040
     }
 )
+# Device classes (model.split(".")[1]) whose actions must go to the cloud even when
+# the central hub claims it can control them. Observed on xiaomi wifispeakers: the
+# gateway answers `play-text` with code 0 but the speaker stays silent, while the
+# same action via cloud is spoken. A silent "success" never falls back, so route
+# these classes to the cloud up front.
+_CLOUD_ONLY_ACTION_CLASSES: frozenset[str] = frozenset({"wifispeaker"})
 # Local success codes (shared by set/get/action routing; named *OK* not *SET*
 # because it also gates GET reads).
 _LOCAL_OK_CODES = frozenset({0, 1})
@@ -721,6 +727,7 @@ class MIoTClient:
         if (
             ch and ch.enabled and ch.can_control(param.did)
             and not ch.in_local_cooldown(param.did)
+            and not self.__is_cloud_only_action(param.did)
         ):
             local_result = _UNSET
             try:
@@ -802,6 +809,13 @@ class MIoTClient:
         # 否则下游仍要按"走了哪条通道"写两套解析。
         await self.__fill_action_out_piids(cloud_result, param)
         return cloud_result
+
+    def __is_cloud_only_action(self, did: str) -> bool:
+        """True if actions for ``did`` must skip the central hub (see _CLOUD_ONLY_ACTION_CLASSES)."""
+        dev = (getattr(self, "_device_buffer", None) or {}).get(did)
+        model = getattr(dev, "model", None) or ""
+        parts = model.split(".")
+        return len(parts) > 1 and parts[1] in _CLOUD_ONLY_ACTION_CLASSES
 
     async def __fill_action_out_piids(
         self, result: dict, param: MIoTActionParam
