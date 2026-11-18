@@ -96,3 +96,6 @@ eval/sampled_*.json
 
 # scripts/build.sh 打包期临时备份的 package.json（正常退出被 mv 掉，硬杀时残留）
 *.build-bak
+
+# Local from-source run state (bin/miloco-backend)
+.miloco-home/

@@ -1,0 +1,22 @@
+#!/bin/sh
+# miloco-cli from this checkout. Starts the backend on demand, then runs the CLI
+# against it with the same $MILOCO_HOME (token is read from $MILOCO_HOME/config.json).
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+export MILOCO_HOME="${MILOCO_HOME:-$REPO/.miloco-home}"
+VENV="$REPO/cli/.venv"
+
+if [ ! -x "$VENV/bin/miloco-cli" ]; then
+  echo "miloco: installing CLI dependencies (uv sync)..." >&2
+  (cd "$REPO/cli" && uv sync --frozen -q)
+fi
+# See bin/miloco-backend: macOS hides .pth files in .venv and Python 3.12+ skips them.
+export PYTHONPATH="$REPO/cli/src${PYTHONPATH:+:$PYTHONPATH}"
+
+case "${1:-}" in
+  ""|-h|--help|--version) ;;              # no backend needed
+  *) "$REPO/bin/miloco-backend" start ;;
+esac
+
+exec "$VENV/bin/miloco-cli" "$@"

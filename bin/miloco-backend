@@ -1,0 +1,77 @@
+#!/bin/sh
+# Run the Miloco backend straight from this checkout: no installer, no OpenClaw/Hermes,
+# no launchd. All state lives in $MILOCO_HOME (default: <repo>/.miloco-home).
+#
+# usage: bin/miloco-backend start|stop|restart|status|logs|fg
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+export MILOCO_HOME="${MILOCO_HOME:-$REPO/.miloco-home}"
+# ONNX models ship in the repo; point at them instead of copying.
+export MILOCO_DIRECTORIES__MODELS="${MILOCO_DIRECTORIES__MODELS:-$REPO/backend/miloco/src/miloco/perception/models}"
+
+VENV="$REPO/backend/.venv"
+PIDFILE="$MILOCO_HOME/backend.pid"
+LOG="$MILOCO_HOME/log/backend.out"
+URL="${MILOCO_URL:-http://127.0.0.1:1810}"
+
+healthy() { curl -sf -o /dev/null --max-time 2 "$URL/health"; }
+
+running_pid() {
+  [ -f "$PIDFILE" ] || return 1
+  pid="$(cat "$PIDFILE")"
+  kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+ensure_venv() {
+  if [ ! -x "$VENV/bin/miloco-backend" ]; then
+    echo "miloco: installing backend dependencies (uv sync)..." >&2
+    (cd "$REPO/backend" && uv sync --all-packages --frozen -q)
+  fi
+}
+
+# macOS keeps setting the `hidden` flag on files inside .venv, and Python 3.12+ skips hidden
+# .pth files, which silently drops the editable workspace installs. Put the sources on the
+# path explicitly instead of relying on .pth files.
+export PYTHONPATH="$REPO/backend/miloco/src:$REPO/backend/miot/src${PYTHONPATH:+:$PYTHONPATH}"
+
+start() {
+  healthy && return 0
+  mkdir -p "$MILOCO_HOME/log"
+  if ! running_pid >/dev/null; then
+    ensure_venv
+    nohup "$VENV/bin/miloco-backend" >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+  fi
+  i=0
+  while [ $i -lt 120 ]; do
+    healthy && return 0
+    running_pid >/dev/null || { echo "miloco: backend exited, see $LOG" >&2; tail -n 30 "$LOG" >&2; return 1; }
+    sleep 1; i=$((i + 1))
+  done
+  echo "miloco: backend not healthy after 120s, see $LOG" >&2
+  return 1
+}
+
+stop() {
+  if pid="$(running_pid)"; then
+    kill "$pid"
+    i=0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid"
+  fi
+  rm -f "$PIDFILE"
+}
+
+case "${1:-status}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status)
+    if healthy; then echo "healthy (pid $(running_pid || echo '?'), $URL)"
+    elif running_pid >/dev/null; then echo "starting or unhealthy (pid $(running_pid))"; exit 1
+    else echo "stopped"; exit 1; fi ;;
+  logs) exec tail -n "${2:-100}" -f "$LOG" ;;
+  fg) ensure_venv; mkdir -p "$MILOCO_HOME"; exec "$VENV/bin/miloco-backend" ;;
+  *) echo "usage: $0 start|stop|restart|status|logs|fg" >&2; exit 2 ;;
+esac
