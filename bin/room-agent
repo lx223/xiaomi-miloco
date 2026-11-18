@@ -1,0 +1,36 @@
+#!/bin/sh
+# Start/stop the room agent (tools/room-agent/room_agent.py).
+# Must be started from inside the Claude Code session that should receive its messages:
+# it inherits that session's CLAUDE_CODE_MESSAGING_SOCKET / _TOKEN.
+#
+# usage: bin/room-agent start <camera did> [...] | stop | status | logs
+set -eu
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+export MILOCO_HOME="${MILOCO_HOME:-$REPO/.miloco-home}"
+STATE="$MILOCO_HOME/room-agent"
+PIDFILE="$STATE/agent.pid"
+LOG="$STATE/agent.log"
+export PYTHONPATH="$REPO/backend/miloco/src:$REPO/backend/miot/src${PYTHONPATH:+:$PYTHONPATH}"
+
+running_pid() { [ -f "$PIDFILE" ] && pid="$(cat "$PIDFILE")" && kill -0 "$pid" 2>/dev/null && echo "$pid"; }
+
+case "${1:-status}" in
+  start)
+    shift
+    [ $# -gt 0 ] || { echo "usage: $0 start <camera did> [...]" >&2; exit 2; }
+    if pid="$(running_pid)"; then echo "already running (pid $pid)"; exit 0; fi
+    [ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ] || echo "warning: not inside a Claude Code session; messages will only be logged" >&2
+    "$REPO/bin/miloco-backend" start
+    mkdir -p "$STATE"
+    nohup "$REPO/backend/.venv/bin/python" "$REPO/tools/room-agent/room_agent.py" "$@" >>"$LOG" 2>&1 &
+    echo $! >"$PIDFILE"
+    echo "started (pid $!), log: $LOG" ;;
+  stop)
+    if pid="$(running_pid)"; then kill "$pid"; echo "stopped"; else echo "not running"; fi
+    rm -f "$PIDFILE" ;;
+  status)
+    if pid="$(running_pid)"; then echo "running (pid $pid)"; else echo "stopped"; exit 1; fi ;;
+  logs) exec tail -n "${2:-50}" -f "$LOG" ;;
+  *) echo "usage: $0 start <camera did> [...] | stop | status | logs" >&2; exit 2 ;;
+esac

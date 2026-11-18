@@ -1,0 +1,50 @@
+#!/bin/sh
+# Speak through the 小爱 speaker in a room, and tell the room agent to stop listening
+# while it talks (so the camera microphone doesn't transcribe the speaker).
+#
+# usage: tools/room-agent/say --room <room name> "<text>"
+#        tools/room-agent/say --did <speaker did> "<text>"
+set -eu
+
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+export MILOCO_HOME="${MILOCO_HOME:-$REPO/.miloco-home}"
+STATE="$MILOCO_HOME/room-agent"
+
+did=""
+case "${1:-}" in
+  --room)
+    room="$2"; shift 2
+    did="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' \
+           "$STATE/rooms.json" "$room" 2>/dev/null || true)"
+    [ -n "$did" ] || { echo "say: no speaker known for room '$room' (see $STATE/rooms.json)" >&2; exit 1; } ;;
+  --did) did="$2"; shift 2 ;;
+  *) echo "usage: $0 --room <room>|--did <did> \"<text>\"" >&2; exit 2 ;;
+esac
+text="$*"
+[ -n "$text" ] || { echo "say: empty text" >&2; exit 2; }
+
+# Rough speaking time: ~0.28 s per CJK char, ~0.4 s per other word, plus cloud latency.
+secs="$(python3 - "$text" <<'EOF'
+import re, sys
+t = sys.argv[1]
+cjk = len(re.findall(r'[㐀-鿿]', t))
+words = len(re.findall(r'[A-Za-z0-9]+', t))
+print(round(cjk * 0.28 + words * 0.4 + 2.5, 1))
+EOF
+)"
+mkdir -p "$STATE"
+python3 -c 'import time,sys; print(time.time() + float(sys.argv[1]))' "$secs" > "$STATE/speaking_until"
+# What is being said, so the agent can tell its own echo apart from someone talking over it.
+python3 -c 'import json,time,sys; json.dump({"text": sys.argv[2], "start": time.time(), "until": time.time() + float(sys.argv[1])}, open(sys.argv[3], "w"), ensure_ascii=False)' \
+  "$secs" "$text" "$STATE/last_said.json"
+
+# Fast path: call the backend directly (play-text is action.5.3 on xiaomi.wifispeaker.oh2);
+# on any other result fall back to miloco-cli, which resolves the action iid from the spec.
+token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["server"]["token"])' "$MILOCO_HOME/config.json")"
+body="$(python3 -c 'import json,sys; print(json.dumps({"type":"call_action","iid":"action.5.3","params":[sys.argv[1]]}, ensure_ascii=False))' "$text")"
+out="$(curl -s -m 10 -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+        -d "$body" "http://127.0.0.1:1810/api/miot/devices/$did/control" || true)"
+case "$out" in
+  *'"code": 0'*'"code": 0'*|*'"code":0'*'"code":0'*) echo "$out"; exit 0 ;;
+esac
+exec "$REPO/bin/miloco-cli" device action "$did" play-text "$text"
