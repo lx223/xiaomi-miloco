@@ -344,6 +344,28 @@ async def test_action_success_as_is():
 
 
 @pytest.mark.asyncio
+async def test_action_wifispeaker_skips_local_even_if_controllable():
+    # The hub answers play-text with code 0 but the speaker stays silent → cloud only.
+    from types import SimpleNamespace
+
+    ch = FakeCentralHub(controllable=["SPK", "LIGHT"],
+                        responses={"SPK": {"code": 0, "out": []}, "LIGHT": {"code": 0, "out": []}})
+    http = FakeHttpClient()
+    client = _make_client(ch, http)
+    client._device_buffer = {
+        "SPK": SimpleNamespace(model="xiaomi.wifispeaker.oh2"),
+        "LIGHT": SimpleNamespace(model="yeelink.light.bulb1"),
+    }
+    res = await client.action_async(_ap("SPK"))
+    assert res["code"] == 0
+    assert ch.local_calls == []
+    assert [p.did for p in http.action_calls] == ["SPK"]
+    await client.action_async(_ap("LIGHT"))
+    assert ch.local_calls == ["LIGHT"]
+    assert [p.did for p in http.action_calls] == ["SPK"]
+
+
+@pytest.mark.asyncio
 async def test_action_not_controllable_goes_cloud():
     ch = FakeCentralHub(controllable=[])
     http = FakeHttpClient()
